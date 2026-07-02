@@ -2253,6 +2253,49 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt)
 	Query	   *qry = makeNode(Query);
 	Node	   *qual;
 	ListCell   *l;
+
+	/* Oracle ROWNUM rewrite: WHERE ROWNUM op N -> LIMIT N */
+	if (ORA_MODE && stmt->whereClause && stmt->limitCount == NULL)
+	{
+		Node *w = stmt->whereClause;
+		if (IsA(w, A_Expr))
+		{
+			A_Expr *ae = (A_Expr *) w;
+			if (ae->lexpr && IsA(ae->lexpr, ColumnRef))
+			{
+				ColumnRef *cr = (ColumnRef *) ae->lexpr;
+				if (list_length(cr->fields) == 1)
+				{
+					char *colname = strVal(linitial(cr->fields));
+					if (colname && strcasecmp(colname, "rownum") == 0 &&
+						ae->rexpr && IsA(ae->rexpr, A_Const))
+					{
+						A_Const *ac = (A_Const *) ae->rexpr;
+						if (ac->val.type == T_Integer)
+						{
+							int nval = ac->val.val.ival;
+							char *opname = strVal(linitial(ae->name));
+							int limit_val = 0;
+							if (strcmp(opname, "=") == 0 || strcmp(opname, "<=") == 0)
+								limit_val = nval;
+							else if (strcmp(opname, "<") == 0)
+								limit_val = nval - 1;
+							if (limit_val > 0)
+							{
+								A_Const *limit = makeNode(A_Const);
+								limit->val.type = T_Integer;
+								limit->val.val.ival = limit_val;
+								limit->location = -1;
+								stmt->limitCount = (Node *) limit;
+								stmt->whereClause = NULL;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	qry->commandType = CMD_SELECT;
 	pstate->cteList = NIL;
 

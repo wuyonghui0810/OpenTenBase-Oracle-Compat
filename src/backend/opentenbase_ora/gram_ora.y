@@ -792,7 +792,7 @@ static Node *reparse_decode_func(List *args, int location);
 	DATA_P DATABASE DAY_P DBTIMEZONE DEALLOCATE DEBUG DEC DECIMAL_P DECLARE DEFAULT DEFAULTS DETERMINISTIC
 	DEFERRABLE DEFERRED DEFINER DELETE_P DELIMITER DELIMITERS DEPENDS DESC
 	DETACH DICTIONARY DIRECT DIRECTORY DISABLE_P DISCARD DISTINCT DISTKEY DISTRIBUTE DISTRIBUTED DISTSTYLE DO DOCUMENT_P DOMAIN_P
-	DOUBLE_P DROP
+	DOUBLE_P DUAL DROP
 
 	EACH ELSE ENABLE_P ENCODING ENCRYPT ENCRYPTED END_P ENUM_P EOL ERROR_P ERRORS ESCAPE EVENT EXCEPT MINUS
 	EXCHANGE
@@ -891,7 +891,7 @@ static Node *reparse_decode_func(List *args, int location);
 %nonassoc   COLLATION COLUMNS COMMENT COMMENTS COMMIT COMMIT_SUBTXN COMMITTED  CONCURRENCY CONFIGURATION CONFLICT CONNECTION CONSTRAINTS CONSTRUCTOR_P CONTENT_P CONTINUE_P
 %nonassoc   CONVERSION_P COORDINATOR COPY COST CPUSET CPU_RATE_LIMIT CSV CURRENT_P CURSOR CYCLE 
 %nonassoc   DATA_P DATABASE DEALLOCATE DEC DECIMAL_P DECLARE DEFAULT DEFAULTS DEFERRED DEFINER DELIMITER DELIMITERS DEPENDS DETACH DICTIONARY DEBUG SPECIFICATION SETTINGS COMPILE DETERMINISTIC
-%nonassoc   DIRECT DISABLE_P DISCARD DISTKEY DISTRIBUTE DISTRIBUTED DISTSTYLE DOCUMENT_P DOMAIN_P DOUBLE_P DROP 
+%nonassoc   DIRECT DISABLE_P DISCARD DISTKEY DISTRIBUTE DISTRIBUTED DISTSTYLE DOCUMENT_P DOMAIN_P DOUBLE_P DUAL DROP 
 %nonassoc   EACH EDITIONABLE ENABLE_P ENCODING ENCRYPT ENCRYPTED ENUM_P ERROR_P 
 %nonassoc   EVENT EXCHANGE EXCLUDE EXCLUDING EXCLUSIVE EXEC EXECUTE EXISTS EXPLAIN EXTENSION EXTENT EXTERNAL /*EXTRACT*/ 
 %nonassoc   FAMILY FILTER FIRST_P FLOAT_P FLASH_CACHE FOR FORCE FORWARD FREELIST FREELISTS FUNCTION FUNCTIONS
@@ -16729,7 +16729,88 @@ from_list:
 /*
  * table_ref is where an alias clause can be attached.
  */
-table_ref:	relation_expr opt_alias_clause
+table_ref:	DUAL CONNECT BY LEVEL LESS_EQUALS Iconst opt_alias_clause
+				{
+					/* Oracle: FROM DUAL CONNECT BY LEVEL <= N
+					 * -> (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL ... SELECT N) AS gs(n)
+					 * Uses RangeSubselect+UNION ALL instead of generate_series
+					 * to avoid ora-mode empty pg_proc catalog issue */
+					int max_level = $6;
+					int i;
+					SelectStmt *first;
+					SelectStmt *result;
+					SelectStmt *branch;
+					SelectStmt *combined;
+					ResTarget *rt;
+					ResTarget *brt;
+					A_Const *c1;
+					A_Const *bc;
+					RangeSubselect *rss;
+
+					if (max_level <= 0)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("CONNECT BY LEVEL requires a positive integer")));
+
+					if (max_level > 1000)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("CONNECT BY LEVEL value too large (maximum 1000)")));
+
+					/* Build first SELECT: SELECT 1 AS n */
+					first = makeNode(SelectStmt);
+					rt = makeNode(ResTarget);
+					c1 = makeNode(A_Const);
+					c1->val.type = T_Integer;
+					c1->val.val.ival = 1;
+					c1->location = -1;
+					c1->lower_ident = false;
+					rt->name = "n";
+					rt->indirection = NIL;
+					rt->val = (Node *) c1;
+					rt->location = -1;
+					first->targetList = list_make1(rt);
+
+					/* Chain UNION ALL for levels 2 through max_level */
+					result = first;
+					for (i = 2; i <= max_level; i++)
+					{
+						branch = makeNode(SelectStmt);
+						brt = makeNode(ResTarget);
+						bc = makeNode(A_Const);
+						bc->val.type = T_Integer;
+						bc->val.val.ival = i;
+						bc->location = -1;
+						bc->lower_ident = false;
+						brt->name = NULL;
+						brt->indirection = NIL;
+						brt->val = (Node *) bc;
+						brt->location = -1;
+						branch->targetList = list_make1(brt);
+
+						combined = makeNode(SelectStmt);
+						combined->op = SETOP_UNION;
+						combined->all = true;
+						combined->larg = result;
+						combined->rarg = branch;
+						result = combined;
+					}
+
+					/* Wrap in RangeSubselect */
+					rss = makeNode(RangeSubselect);
+					rss->subquery = (Node *) result;
+					rss->lateral = false;
+					rss->alias = $7;
+					if (rss->alias == NULL)
+					{
+						rss->alias = makeNode(Alias);
+						rss->alias->aliasname = "gs";
+						rss->alias->colnames = list_make1(makeString("n"));
+					}
+
+					$$ = (Node *) rss;
+				}
+		| relation_expr opt_alias_clause
 				{
 					$1->alias = $2;
 					$$ = (Node *) $1;
@@ -18923,6 +19004,47 @@ b_expr:		c_expr
  */
 c_expr:		columnref								{ $$ = $1; }
 			| AexprConst							{ $$ = $1; }
+			| LEVEL
+				{
+					/* Oracle LEVEL -> gs.n */
+					ColumnRef *cr = makeNode(ColumnRef);
+					cr->fields = list_make2(makeString("gs"), makeString("n"));
+					cr->location = @1;
+					$$ = (Node *) cr;
+				}
+		| ROWNUM '=' Iconst
+			{
+				ColumnRef *cr = makeNode(ColumnRef);
+				cr->fields = list_make1(makeString("rownum"));
+				cr->location = @1;
+				A_Const *ic = makeNode(A_Const);
+				ic->val.type = T_Integer;
+				ic->val.val.ival = $3;
+				ic->location = @3;
+				$$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "=", (Node *)cr, (Node *)ic, @2);
+			}
+		| ROWNUM LESS_EQUALS Iconst
+			{
+				ColumnRef *cr = makeNode(ColumnRef);
+				cr->fields = list_make1(makeString("rownum"));
+				cr->location = @1;
+				A_Const *ic = makeNode(A_Const);
+				ic->val.type = T_Integer;
+				ic->val.val.ival = $3;
+				ic->location = @3;
+				$$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "<=", (Node *)cr, (Node *)ic, @2);
+			}
+		| ROWNUM '<' Iconst
+			{
+				ColumnRef *cr = makeNode(ColumnRef);
+				cr->fields = list_make1(makeString("rownum"));
+				cr->location = @1;
+				A_Const *ic = makeNode(A_Const);
+				ic->val.type = T_Integer;
+				ic->val.val.ival = $3;
+				ic->location = @3;
+				$$ = (Node *) makeSimpleA_Expr(AEXPR_OP, "<", (Node *)cr, (Node *)ic, @2);
+			}
 			| PARAM opt_indirection
 				{
 					ParamRef *p = makeNode(ParamRef);
@@ -22272,6 +22394,7 @@ unreserved_keyword:
 			| DOMAIN_P
 			| DOUBLE_P
 			| DROP
+			| DUAL
 			| EACH
 			| EDITIONABLE
 			| ENABLE_P

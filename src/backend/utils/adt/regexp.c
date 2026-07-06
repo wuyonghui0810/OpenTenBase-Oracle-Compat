@@ -1957,6 +1957,32 @@ orcl_regexp_replace(PG_FUNCTION_ARGS)
 		/* use default collation oid */
 		collid = DEFAULT_COLLATION_OID;
 	}
+	/*
+	 * OpenTenBase Oracle compatibility: expand [:alnum:] to include
+	 * Unicode CJK characters so Chinese chars are preserved.
+	 */
+	{
+		char	   *pat = text_to_cstring(p);
+
+		if (strstr(pat, "[:alnum:]") != NULL)
+		{
+			StringInfoData buf;
+			char	   *pos = pat;
+			char	   *hit;
+
+			initStringInfo(&buf);
+			while ((hit = strstr(pos, "[:alnum:]")) != NULL)
+			{
+				appendBinaryStringInfo(&buf, pos, hit - pos);
+				appendStringInfoString(&buf,
+					"[:alnum:]\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff");
+				pos = hit + 9;
+			}
+			appendStringInfoString(&buf, pos);
+			p = cstring_to_text_with_len(buf.data, buf.len);
+			pfree(buf.data);
+		}
+	}
 
 	re = RE_compile_and_cache(p, flags.cflags, collid);
 

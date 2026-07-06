@@ -1965,7 +1965,21 @@ transformAExprNullIf(ParseState *pstate, A_Expr *a)
     OpExpr	   *result;
 
 	if (ORA_MODE)
+	{
+		/*
+		 * TDSQL compatibility: allow NULLIF(NULL, expr).
+		 * Oracle mode may represent NULL as either a NULL pointer
+		 * or a Const with constisnull=true. Return NULL immediately.
+		 */
+		if (lexpr == NULL)
+			return (Node *) makeNullConst(UNKNOWNOID, -1, InvalidOid);
+		if (IsA(lexpr, Const) && ((Const *) lexpr)->constisnull)
+			return (Node *) makeNullConst(UNKNOWNOID, -1, InvalidOid);
+		if (IsA(lexpr, Const) && ((Const *) lexpr)->constlen == NULL_TYPE_STR_LEN)
+			return (Node *) makeNullConst(UNKNOWNOID, -1, InvalidOid);
+		
 		ora_check_nullif_args(lexpr, rexpr);
+	}
 
     result = (OpExpr *) make_op(pstate,
                                 a->name,

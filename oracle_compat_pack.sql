@@ -57,16 +57,42 @@ RETURNS DATE AS 'SELECT (d + INTERVAL ''1 month'' * n)::DATE'
 LANGUAGE SQL IMMUTABLE STRICT;
 
 -- ========== MONTHS_BETWEEN ==========
-DROP FUNCTION IF EXISTS months_between(DATE, DATE);
-DROP FUNCTION IF EXISTS months_between(TIMESTAMP, TIMESTAMP);
+-- Oracle formula: (year*12+month diff) + (day diff)/31
+-- v2: fixed missing fractional day part (was returning integer only)
+DROP FUNCTION IF EXISTS months_between(DATE, DATE) CASCADE;
+DROP FUNCTION IF EXISTS months_between(TIMESTAMP, TIMESTAMP) CASCADE;
 
 CREATE OR REPLACE FUNCTION months_between(d1 DATE, d2 DATE)
-RETURNS NUMERIC AS 'SELECT CAST(EXTRACT(YEAR FROM AGE(d1, d2)) * 12 + EXTRACT(MONTH FROM AGE(d1, d2)) AS NUMERIC)'
-LANGUAGE SQL IMMUTABLE STRICT;
+RETURNS NUMERIC AS $$
+DECLARE
+    total_months1 int;
+    total_months2 int;
+    day_diff int;
+    month_diff numeric;
+BEGIN
+    total_months1 := EXTRACT(YEAR FROM d1)::int * 12 + EXTRACT(MONTH FROM d1)::int;
+    total_months2 := EXTRACT(YEAR FROM d2)::int * 12 + EXTRACT(MONTH FROM d2)::int;
+    day_diff := EXTRACT(DAY FROM d1)::int - EXTRACT(DAY FROM d2)::int;
+    month_diff := total_months1 - total_months2;
+    RETURN month_diff + (day_diff::numeric / 31);
+END;
+$$ LANGUAGE plpgsql IMMUTABLE STRICT;
 
 CREATE OR REPLACE FUNCTION months_between(d1 TIMESTAMP, d2 TIMESTAMP)
-RETURNS NUMERIC AS 'SELECT CAST(EXTRACT(YEAR FROM AGE(d1, d2)) * 12 + EXTRACT(MONTH FROM AGE(d1, d2)) AS NUMERIC)'
-LANGUAGE SQL IMMUTABLE STRICT;
+RETURNS NUMERIC AS $$
+DECLARE
+    total_months1 int;
+    total_months2 int;
+    day_diff int;
+    month_diff numeric;
+BEGIN
+    total_months1 := EXTRACT(YEAR FROM d1)::int * 12 + EXTRACT(MONTH FROM d1)::int;
+    total_months2 := EXTRACT(YEAR FROM d2)::int * 12 + EXTRACT(MONTH FROM d2)::int;
+    day_diff := EXTRACT(DAY FROM d1)::int - EXTRACT(DAY FROM d2)::int;
+    month_diff := total_months1 - total_months2;
+    RETURN month_diff + (day_diff::numeric / 31);
+END;
+$$ LANGUAGE plpgsql IMMUTABLE STRICT;
 
 -- ========== TRUNC for DATE/TIMESTAMP (with Oracle format translation) ==========
 DROP FUNCTION IF EXISTS trunc(DATE);
